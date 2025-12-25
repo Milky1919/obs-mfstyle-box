@@ -19,3 +19,10 @@
 127.0.0.1 - - [25/Dec/2025 01:50:08] "GET /index.html HTTP/1.1" 200 -
 127.0.0.1 - - [25/Dec/2025 01:50:08] "GET /assets/js/gsap.min.js HTTP/1.1" 200 -
 127.0.0.1 - - [25/Dec/2025 01:50:08] "GET /assets/js/app_display.js HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /controller.html HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /assets/css/style.css HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /assets/js/app_controller.js HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /assets/fonts/MochiyPopOne-Regular.woff2 HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /index.html HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /assets/js/gsap.min.js HTTP/1.1" 200 -
+127.0.0.1 - - [25/Dec/2025 02:02:23] "GET /assets/js/app_display.js HTTP/1.1" 200 -

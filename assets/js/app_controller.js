@@ -35,20 +35,24 @@ broadcast.onmessage = (event) => {
         const payload = data.payload;
 
         // Handle Loop Mode Auto-Reset Sync
-        if (payload.resetOccurred) {
+        // PROTECTION: In Exhaust Mode, we NEVER want to accept a cycle reset from a remote client
+        // that might think it's in Loop Mode.
+        if (payload.resetOccurred && appState.mode === 'loop') {
             appState.usedItems = [];
         }
 
         // Update local state from foreign spin
         if (payload.resultValue) {
+            // Paranoid check to ensure we track usage even if we missed the start
             if (!appState.usedItems.includes(payload.resultValue)) {
                 appState.usedItems.push(payload.resultValue);
             }
         }
         appState.playerCounts[payload.playerId] = (appState.playerCounts[payload.playerId] || 0) + 1;
         updateUI();
-        // Note: We don't saveState() here immediately to avoid potential race conditions with the sender,
-        // but the sender has already saved to localStorage.
+        // We do NOT saveState() here. We trust the sender saved it.
+        // If we save here, we might race.
+
     } else if (data.type === 'RESET_GAME') {
         appState.usedItems = [];
         appState.playerCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -62,16 +66,21 @@ broadcast.onmessage = (event) => {
 // Save Deck Config
 document.getElementById('saveDeckBtn').addEventListener('click', () => {
     const rawText = deckInput.value;
-    const items = rawText.split('\n').map(s => s.trim()).filter(s => s !== '');
+    // Deduplicate items immediately to prevent confusion
+    const rawItems = rawText.split('\n').map(s => s.trim()).filter(s => s !== '');
+    const uniqueItems = Array.from(new Set(rawItems));
 
-    if (items.length === 0) {
+    if (uniqueItems.length === 0) {
         alert('山札が空です！');
         return;
     }
 
+    // Update input to reflect deduplication
+    deckInput.value = uniqueItems.join('\n');
+
     const mode = document.querySelector('input[name="deckMode"]:checked').value;
 
-    appState.deck = items;
+    appState.deck = uniqueItems;
     appState.mode = mode;
     appState.usedItems = [];
     appState.playerCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -90,7 +99,7 @@ function loadState() {
             const parsed = JSON.parse(saved);
             // Merge basic fields
             if (parsed.deck) {
-                // PROTECTION: Merge usedItems to prevent data loss if disk has more info
+                // PROTECTION: Merge usedItems to prevent data loss
                 const currentUsed = new Set(appState.usedItems);
                 const diskUsed = new Set(parsed.usedItems || []);
                 const mergedUsed = new Set([...currentUsed, ...diskUsed]);
@@ -130,15 +139,16 @@ function updateUI() {
     let modeText = appState.mode === 'exhaust' ? '[枯渇]' : '[ループ]';
 
     // Calculate remaining items
+    const usedCount = appState.usedItems.length;
     const remaining = appState.deck.filter(i => !appState.usedItems.includes(i)).length;
 
     if (appState.mode === 'exhaust') {
-        deckCountSpan.textContent = `${remaining} / ${count}`;
+        deckCountSpan.textContent = `${remaining} / ${count} (Used: ${usedCount})`;
         if (remaining === 0) deckStatus.textContent = `${modeText} Empty (Miss)`;
         else deckStatus.textContent = `${modeText} Ready`;
     } else {
         // Loop mode: show remaining in current cycle
-        deckCountSpan.textContent = `${remaining} / ${count} (Cycle)`;
+        deckCountSpan.textContent = `${remaining} / ${count} (Cycle) (Used: ${usedCount})`;
         deckStatus.textContent = `${modeText} Ready`;
     }
 
@@ -149,12 +159,7 @@ function updateUI() {
             btn.disabled = true;
             btn.innerHTML = `${i}P <small>MAX</small>`;
         } else {
-            // Only re-enable if not in cooldown (checked via disabled attribute logic in triggerSpin)
-            // But here we might overwrite it.
-            // Better strategy: Only disable if MAX. If we want to handle cooldown, we should check if it's currently in cooldown?
-            // For simplicity, we assume updateUI is called after Spin finishes or on load.
-            // If we are in the middle of a cooldown, this might re-enable it prematurely if called from elsewhere.
-            // However, updateUI is usually called after state change.
+             // Only re-enable if not in cooldown
             if (!btn.hasAttribute('data-cooldown')) {
                  btn.disabled = false;
             }
@@ -165,7 +170,7 @@ function updateUI() {
 
 // Core Logic
 window.triggerSpin = (playerId) => {
-    // UI Cooldown to prevent physical spam
+    // UI Cooldown
     const btn = document.getElementById(`btn-p${playerId}`);
     if (btn) {
         btn.disabled = true;
@@ -182,8 +187,7 @@ window.triggerSpin = (playerId) => {
 
     // USE WEB LOCKS API for atomic transactions
     navigator.locks.request('obs_mk_spin_lock', async (lock) => {
-        // NOTE: We REMOVED loadState() here to trust the in-memory state.
-        // This prevents overwriting recent in-memory updates with stale disk data during rapid interactions.
+        // Trust In-Memory State. Do NOT call loadState() here.
 
         if (appState.playerCounts[playerId] >= 20) return;
 
@@ -197,58 +201,80 @@ window.triggerSpin = (playerId) => {
         let isMiss = false;
         let resetOccurred = false;
 
-        // Determine available candidates
-        let available = appState.deck.filter(item => !appState.usedItems.includes(item));
+        // RETRY LOOP: Paranoid check against internal consistency or race
+        let attempts = 0;
+        let validPick = false;
 
-        if (available.length === 0) {
-            if (appState.mode === 'loop') {
-                // Loop Mode: Reset usedItems and start fresh
-                appState.usedItems = [];
-                resetOccurred = true;
+        while (!validPick && attempts < 3) {
+            attempts++;
 
-                // Refill available
-                available = [...appState.deck];
+            // Filter available
+            let available = appState.deck.filter(item => !appState.usedItems.includes(item));
 
-                if (available.length === 0) {
-                    // Deck is empty (user deleted all items?)
-                    isMiss = true;
+            if (available.length === 0) {
+                if (appState.mode === 'loop') {
+                    // Loop Mode: Reset usedItems and start fresh
+                    appState.usedItems = [];
+                    resetOccurred = true;
+
+                    // Refill available
+                    available = [...appState.deck];
+
+                    if (available.length === 0) {
+                        isMiss = true;
+                        validPick = true;
+                    } else {
+                        const randomIndex = Math.floor(Math.random() * available.length);
+                        result = available[randomIndex];
+                        // Don't push yet, verify at end of loop
+                    }
                 } else {
-                    // Pick one
-                    const randomIndex = Math.floor(Math.random() * available.length);
-                    result = available[randomIndex];
-                    appState.usedItems.push(result);
+                    // Exhaust Mode: Empty -> Miss
+                    isMiss = true;
+                    validPick = true;
                 }
             } else {
-                // Exhaust Mode: Empty -> Miss
-                isMiss = true;
+                // Normal Pick
+                const randomIndex = Math.floor(Math.random() * available.length);
+                result = available[randomIndex];
             }
-        } else {
-            // Normal Pick
-            const randomIndex = Math.floor(Math.random() * available.length);
-            result = available[randomIndex];
-            appState.usedItems.push(result);
+
+            // Final Validation
+            if (!isMiss && result !== null) {
+                if (appState.usedItems.includes(result)) {
+                    // This should theoretically never happen due to filter,
+                    // but if state mutated asynchronously (impossible inside Lock?), we retry.
+                    console.warn('Detected duplicate pick candidate, retrying...', result);
+                    result = null;
+                    resetOccurred = false; // Undo partial reset flag if we are retrying
+                    continue;
+                } else {
+                    appState.usedItems.push(result);
+                    validPick = true;
+                }
+            } else {
+                // Miss or valid empty
+                validPick = true;
+            }
         }
 
         // Color ID
         const colorIndex = appState.playerCounts[playerId] % 20;
-
-        // Visual Candidates: For animation purposes
-        // If we just reset, use full deck. If not, use available (before pick) or deck.
         const visualCandidates = (appState.deck.length > 0) ? appState.deck : ['?'];
 
         const payload = {
             playerId,
-            resultValue: result, // Null if Miss
+            resultValue: result,
             isMiss,
             colorIndex,
             timestamp: Date.now(),
             candidates: visualCandidates,
-            resetOccurred // Notify others that we reset the cycle
+            resetOccurred
         };
 
         // Update State
         appState.playerCounts[playerId]++;
-        saveState();
+        saveState(); // Commit to Disk immediately
 
         // Send
         broadcast.postMessage({
