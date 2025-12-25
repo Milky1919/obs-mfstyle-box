@@ -51,7 +51,6 @@ broadcast.onmessage = (event) => {
         appState.playerCounts[payload.playerId] = (appState.playerCounts[payload.playerId] || 0) + 1;
         updateUI();
         // We do NOT saveState() here. We trust the sender saved it.
-        // If we save here, we might race.
 
     } else if (data.type === 'RESET_GAME') {
         appState.usedItems = [];
@@ -187,7 +186,10 @@ window.triggerSpin = (playerId) => {
 
     // USE WEB LOCKS API for atomic transactions
     navigator.locks.request('obs_mk_spin_lock', async (lock) => {
-        // Trust In-Memory State. Do NOT call loadState() here.
+        // CRITICAL: Reload state from storage inside the lock!
+        // This ensures that if another tab/process held the lock just before us,
+        // we get their committed state (the true state of the deck).
+        loadState();
 
         if (appState.playerCounts[playerId] >= 20) return;
 
@@ -275,6 +277,7 @@ window.triggerSpin = (playerId) => {
         // Update State
         appState.playerCounts[playerId]++;
         saveState(); // Commit to Disk immediately
+        updateUI();
 
         // Send
         broadcast.postMessage({
