@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lottery Display</title>
+    <link rel="stylesheet" href="./assets/css/style.css">
+    <!-- GSAP will be loaded here. User needs to provide it. -->
+    <script src="./assets/js/gsap.min.js"></script>
+</head>
+
+<body>
+    <div class="display-root">
+        <div class="display-container" id="movable-container">
+            <!-- Player 1 -->
+            <div class="player-row" id="p1-row">
+                <div class="player-label">1P</div>
+                <div class="history-container" id="p1-history">
+                    <!-- Slots will be injected here -->
+                </div>
+            </div>
+
+            <!-- Player 2 -->
+            <div class="player-row" id="p2-row">
+                <div class="player-label">2P</div>
+                <div class="history-container" id="p2-history"></div>
+            </div>
+
+            <!-- Player 3 -->
+            <div class="player-row" id="p3-row">
+                <div class="player-label">3P</div>
+                <div class="history-container" id="p3-history"></div>
+            </div>
+
+            <!-- Player 4 -->
+            <div class="player-row" id="p4-row">
+                <div class="player-label">4P</div>
+                <div class="history-container" id="p4-history"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application Logic -->
+    <script src="./assets/js/app_display.js"></script>
+</body>
+
+</html>

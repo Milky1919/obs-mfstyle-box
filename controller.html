@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lottery Controller</title>
+    <link rel="stylesheet" href="./assets/css/style.css">
+</head>
+
+<body class="controller-body">
+    <div class="control-panel">
+        <!-- Deck Settings -->
+        <div class="panel-section">
+            <div class="panel-title">山札設定 (Deck)</div>
+            <textarea id="deckInput" placeholder="アイテムを改行区切りで入力">A
+B
+C
+D
+E
+F
+G
+H
+I
+J
+K
+L</textarea>
+            <div class="option-group" style="margin-top: 5px;">
+                <label>
+                    <input type="radio" name="deckMode" value="loop" checked> ループ (リセット)
+                </label>
+                <label>
+                    <input type="radio" name="deckMode" value="exhaust"> 枯渇 (ハズレ排出)
+                </label>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <button id="saveDeckBtn" class="btn-success">設定保存 & リセット</button>
+                <span id="deckStatus" style="font-size: 10px; color: #888; align-self: center;">Ready</span>
+            </div>
+        </div>
+
+        <!-- Player Controls -->
+        <div class="panel-section">
+            <div class="panel-title">抽選 (SPIN)</div>
+            <div class="player-controls">
+                <button class="p-btn" onclick="triggerSpin(1)" id="btn-p1">1P <small>SPIN</small></button>
+                <button class="p-btn" onclick="triggerSpin(2)" id="btn-p2">2P <small>SPIN</small></button>
+                <button class="p-btn" onclick="triggerSpin(3)" id="btn-p3">3P <small>SPIN</small></button>
+                <button class="p-btn" onclick="triggerSpin(4)" id="btn-p4">4P <small>SPIN</small></button>
+            </div>
+        </div>
+
+        <!-- Position Controls -->
+        <div class="panel-section">
+            <div class="panel-title">表示位置・サイズ (Layout)</div>
+            <div class="option-group" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px;">
+                <div>
+                    <small>X (px)</small>
+                    <input type="number" id="posX" value="0" style="width: 100%;">
+                </div>
+                <div>
+                    <small>Y (px)</small>
+                    <input type="number" id="posY" value="0" style="width: 100%;">
+                </div>
+                <div>
+                    <small>Scale</small>
+                    <input type="number" id="scale" value="1.0" step="0.1" style="width: 100%;">
+                </div>
+            </div>
+            <button class="btn-warning" style="width: 100%; margin-top: 5px;" onclick="updateLayout()">レイアウト更新</button>
+        </div>
+
+        <!-- Global Controls -->
+        <div class="panel-section">
+            <div class="panel-title">システム管理</div>
+            <div style="display: flex; gap: 5px;">
+                <button class="btn-danger" style="flex: 1;" onclick="resetGame()">全リセット</button>
+                <button class="btn-warning" style="flex: 1;" onclick="reloadDisplay()">表示更新</button>
+            </div>
+        </div>
+
+        <!-- Debug Info -->
+        <div class="panel-section">
+            <div class="panel-title">現在の山札数: <span id="deckCount">--</span></div>
+        </div>
+    </div>
+
+    <script src="./assets/js/app_controller.js"></script>
+</body>
+
+</html>
