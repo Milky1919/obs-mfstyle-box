@@ -22,6 +22,7 @@ const playerHistories = {
     3: [],
     4: []
 };
+const globalUsedItems = new Set(); // Gatekeeper for Uniqueness
 
 // Listen for messages
 broadcast.onmessage = (event) => {
@@ -55,6 +56,7 @@ function handleUpdateConfig(payload) {
 }
 
 function handleReset() {
+    globalUsedItems.clear(); // Reset gatekeeper
     for (let i = 1; i <= 4; i++) {
         const container = document.getElementById(`p${i}-history`);
         container.innerHTML = '';
@@ -63,7 +65,27 @@ function handleReset() {
 }
 
 function handleSpin(payload) {
-    const { playerId, resultValue, isMiss, colorIndex } = payload;
+    let { playerId, resultValue, isMiss, colorIndex, resetOccurred, mode } = payload;
+
+    // --- GATEKEEPER LOGIC ---
+    if (resetOccurred) {
+        globalUsedItems.clear();
+    }
+
+    if (!isMiss && resultValue) {
+        if (globalUsedItems.has(resultValue)) {
+            // Duplicate detected!
+            // In Exhaust mode, this is strictly forbidden.
+            // In Loop mode, if no reset occurred, this implies a race condition duplicate within the same cycle.
+            console.warn(`[Display Gatekeeper] Prevented duplicate display of: ${resultValue}. Mode: ${mode}`);
+            isMiss = true;
+            resultValue = null;
+        } else {
+            // Valid new item
+            globalUsedItems.add(resultValue);
+        }
+    }
+    // ------------------------
 
     // Create DOM elements
     const container = document.getElementById(`p${playerId}-history`);

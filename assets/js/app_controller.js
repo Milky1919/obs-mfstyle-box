@@ -271,7 +271,8 @@ window.triggerSpin = (playerId) => {
             colorIndex,
             timestamp: Date.now(),
             candidates: visualCandidates,
-            resetOccurred
+            resetOccurred,
+            mode: appState.mode // Send mode for Display Gatekeeper
         };
 
         // Update State
