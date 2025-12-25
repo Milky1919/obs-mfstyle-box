@@ -12,7 +12,7 @@ let appState = {
     layout: { x: 0, y: 0, scale: 1.0 } // Default layout
 };
 
-// OM
+// DOM Elements
 const deckInput = document.getElementById('deckInput');
 const deckStatus = document.getElementById('deckStatus');
 const deckCountSpan = document.getElementById('deckCount');
@@ -26,16 +26,20 @@ window.addEventListener('DOMContentLoaded', () => {
     updateUI();
 });
 
-// Setup Sync Listener (To handle multiple controller tabs preventing duplicates)
+// Setup Sync Listener
 broadcast.onmessage = (event) => {
     const data = event.data;
     if (!data || !data.type) return;
 
     if (data.type === 'SPIN') {
         const payload = data.payload;
+
+        // Handle Loop Mode Auto-Reset Sync
+        if (payload.resetOccurred) {
+            appState.usedItems = [];
+        }
+
         // Update local state from foreign spin
-        // ALWAYS track used items, even if we are locally in Loop mode currently.
-        // This ensures that if we switch to Exhaust (or auto-switch via UI), we know what's gone.
         if (payload.resultValue) {
             if (!appState.usedItems.includes(payload.resultValue)) {
                 appState.usedItems.push(payload.resultValue);
@@ -43,8 +47,8 @@ broadcast.onmessage = (event) => {
         }
         appState.playerCounts[payload.playerId] = (appState.playerCounts[payload.playerId] || 0) + 1;
         updateUI();
-        // Don't saveState() here to avoid race? strict consistency difficult without leader
-        // But preventing collision is key.
+        // Note: We don't saveState() here immediately to avoid potential race conditions with the sender,
+        // but the sender has already saved to localStorage.
     } else if (data.type === 'RESET_GAME') {
         appState.usedItems = [];
         appState.playerCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -86,13 +90,9 @@ function loadState() {
             const parsed = JSON.parse(saved);
             // Merge basic fields
             if (parsed.deck) {
-                // PROTECTION: Don't just overwrite usedItems. Merge them.
-                // This ensures that if we have "more recent" items from Broadcast that haven't hit disk yet,
-                // we keep them.
+                // PROTECTION: Merge usedItems to prevent data loss if disk has more info
                 const currentUsed = new Set(appState.usedItems);
                 const diskUsed = new Set(parsed.usedItems || []);
-
-                // Union
                 const mergedUsed = new Set([...currentUsed, ...diskUsed]);
 
                 appState = { ...appState, ...parsed };
@@ -106,10 +106,9 @@ function loadState() {
                 const rad = document.querySelector(`input[name="deckMode"][value="${appState.mode}"]`);
                 if (rad) rad.checked = true;
             }
-            // Layout sync is separate usually but state has it
+            // Layout sync
             if (parsed.layout) {
                 appState.layout = { ...appState.layout, ...parsed.layout };
-                // Update inputs if they match current state
                 if (posXInput) posXInput.value = appState.layout.x;
                 if (posYInput) posYInput.value = appState.layout.y;
                 if (scaleInput) scaleInput.value = appState.layout.scale;
@@ -127,18 +126,19 @@ function saveState() {
 
 function updateUI() {
     // Deck count
-    // In loop mode, deck is practically infinite, but we show base size
-    // In exhaust mode, we show remaining
     let count = appState.deck.length;
     let modeText = appState.mode === 'exhaust' ? '[枯渇]' : '[ループ]';
 
+    // Calculate remaining items
+    const remaining = appState.deck.filter(i => !appState.usedItems.includes(i)).length;
+
     if (appState.mode === 'exhaust') {
-        const remaining = appState.deck.filter(i => !appState.usedItems.includes(i)).length;
         deckCountSpan.textContent = `${remaining} / ${count}`;
         if (remaining === 0) deckStatus.textContent = `${modeText} Empty (Miss)`;
         else deckStatus.textContent = `${modeText} Ready`;
     } else {
-        deckCountSpan.textContent = `${count}`;
+        // Loop mode: show remaining in current cycle
+        deckCountSpan.textContent = `${remaining} / ${count} (Cycle)`;
         deckStatus.textContent = `${modeText} Ready`;
     }
 
@@ -149,7 +149,15 @@ function updateUI() {
             btn.disabled = true;
             btn.innerHTML = `${i}P <small>MAX</small>`;
         } else {
-            btn.disabled = false;
+            // Only re-enable if not in cooldown (checked via disabled attribute logic in triggerSpin)
+            // But here we might overwrite it.
+            // Better strategy: Only disable if MAX. If we want to handle cooldown, we should check if it's currently in cooldown?
+            // For simplicity, we assume updateUI is called after Spin finishes or on load.
+            // If we are in the middle of a cooldown, this might re-enable it prematurely if called from elsewhere.
+            // However, updateUI is usually called after state change.
+            if (!btn.hasAttribute('data-cooldown')) {
+                 btn.disabled = false;
+            }
             btn.innerHTML = `${i}P <small>SPIN</small>`;
         }
     }
@@ -157,11 +165,25 @@ function updateUI() {
 
 // Core Logic
 window.triggerSpin = (playerId) => {
-    // USE WEB LOCKS API for atomic transactions across multiple tabs/docks.
+    // UI Cooldown to prevent physical spam
+    const btn = document.getElementById(`btn-p${playerId}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute('data-cooldown', 'true');
+        setTimeout(() => {
+            if (btn) {
+                btn.removeAttribute('data-cooldown');
+                if (appState.playerCounts[playerId] < 20) {
+                    btn.disabled = false;
+                }
+            }
+        }, 500);
+    }
+
+    // USE WEB LOCKS API for atomic transactions
     navigator.locks.request('obs_mk_spin_lock', async (lock) => {
-        // CRITICAL: Always reload state from storage before acting.
-        // This prevents race conditions where rapid clicks use stale memory state.
-        loadState();
+        // NOTE: We REMOVED loadState() here to trust the in-memory state.
+        // This prevents overwriting recent in-memory updates with stale disk data during rapid interactions.
 
         if (appState.playerCounts[playerId] >= 20) return;
 
@@ -173,67 +195,46 @@ window.triggerSpin = (playerId) => {
 
         let result = null;
         let isMiss = false;
+        let resetOccurred = false;
 
-        // Strict Retry Loop for Uniqueness
-        // We try up to 3 times to get a valid result if something weird happens, 
-        // although filtering should guarantee it.
-        let attempts = 0;
-        let validPick = false;
-        let available = [];
+        // Determine available candidates
+        let available = appState.deck.filter(item => !appState.usedItems.includes(item));
 
-        while (!validPick && attempts < 3) {
-            attempts++;
+        if (available.length === 0) {
+            if (appState.mode === 'loop') {
+                // Loop Mode: Reset usedItems and start fresh
+                appState.usedItems = [];
+                resetOccurred = true;
 
-            // Filter available items if exhaust
-            available = [...appState.deck];
-            if (appState.mode === 'exhaust') {
-                available = available.filter(item => !appState.usedItems.includes(item));
-            }
+                // Refill available
+                available = [...appState.deck];
 
-            if (available.length === 0) {
-                // Empty
-                if (appState.mode === 'loop') {
+                if (available.length === 0) {
+                    // Deck is empty (user deleted all items?)
                     isMiss = true;
-                    validPick = true;
                 } else {
-                    // Exhaust mode empty -> Miss
-                    isMiss = true;
-                    validPick = true;
+                    // Pick one
+                    const randomIndex = Math.floor(Math.random() * available.length);
+                    result = available[randomIndex];
+                    appState.usedItems.push(result);
                 }
             } else {
-                // Random pick
-                const randomIndex = Math.floor(Math.random() * available.length);
-                result = available[randomIndex];
-
-                // Paranoid Check for Exhaust Mode
-                if (appState.mode === 'exhaust') {
-                    if (appState.usedItems.includes(result)) {
-                        console.warn('Duplicate detected during pick, retrying...', result);
-                        result = null; // Retry
-                        continue;
-                    } else {
-                        appState.usedItems.push(result);
-                        validPick = true;
-                    }
-                } else {
-                    validPick = true;
-                }
+                // Exhaust Mode: Empty -> Miss
+                isMiss = true;
             }
+        } else {
+            // Normal Pick
+            const randomIndex = Math.floor(Math.random() * available.length);
+            result = available[randomIndex];
+            appState.usedItems.push(result);
         }
 
-        // Color ID: Simple hashing or random? 
-        // "配色はインデックス順" from spec 2.3 usually means 0..19 loop based on history count?
-        // "抽選結果の文字色・背景色として、以下の20色をインデックス順に使用する"
-        // Does it mean fixed color for "Item A", or "1st spin is Red, 2nd is Orange"?
-        // Usually Mario Kart is random or item-based.
-        // Spec says "Index 0..19". Let's use the local player history count for rainbow effect.
-        // Color ID: Simple hashing loop
+        // Color ID
         const colorIndex = appState.playerCounts[playerId] % 20;
 
-        // Visual Candidates:
-        // Even if it's a "Miss" (result is effectively null), we want the cube to visually rotate through options.
-        // If available is empty, we must fallback to the full deck for the animation.
-        const visualCandidates = (available.length > 0) ? available : appState.deck;
+        // Visual Candidates: For animation purposes
+        // If we just reset, use full deck. If not, use available (before pick) or deck.
+        const visualCandidates = (appState.deck.length > 0) ? appState.deck : ['?'];
 
         const payload = {
             playerId,
@@ -241,7 +242,8 @@ window.triggerSpin = (playerId) => {
             isMiss,
             colorIndex,
             timestamp: Date.now(),
-            candidates: visualCandidates.length > 0 ? visualCandidates : ['?'] // Fallback if deck is empty too
+            candidates: visualCandidates,
+            resetOccurred // Notify others that we reset the cycle
         };
 
         // Update State
