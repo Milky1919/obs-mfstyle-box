@@ -12,6 +12,25 @@ let appState = {
     layout: { x: 0, y: 0, scale: 1.0 } // Default layout
 };
 
+// Visual Logger for OBS Docks (no dev tools)
+function log(message, type = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    const prefix = type === 'error' ? '❌' : type === 'warn' ? '⚠️' : '✅';
+    const logLine = `[${timestamp}] ${prefix} ${message}`;
+
+    // Console
+    if (type === 'error') console.error(logLine);
+    else if (type === 'warn') console.warn(logLine);
+    else console.log(logLine);
+
+    // UI Panel
+    const logEl = document.getElementById('logOutput');
+    if (logEl) {
+        logEl.innerHTML += logLine + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+}
+
 // DOM Elements
 const deckInput = document.getElementById('deckInput');
 const deckStatus = document.getElementById('deckStatus');
@@ -158,9 +177,9 @@ function updateUI() {
             btn.disabled = true;
             btn.innerHTML = `${i}P <small>MAX</small>`;
         } else {
-             // Only re-enable if not in cooldown
+            // Only re-enable if not in cooldown
             if (!btn.hasAttribute('data-cooldown')) {
-                 btn.disabled = false;
+                btn.disabled = false;
             }
             btn.innerHTML = `${i}P <small>SPIN</small>`;
         }
@@ -168,30 +187,92 @@ function updateUI() {
 }
 
 // Core Logic
-window.triggerSpin = (playerId) => {
+// Use localStorage-based locking instead of Web Locks.
+// Web Locks don't work across separate OBS browser source processes.
+const LOCK_KEY = 'obs_mk_spin_lock_v1';
+const LOCK_TIMEOUT = 5000; // Lock expires after 5 seconds (failsafe)
+
+async function acquireLock() {
+    const myId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const maxRetries = 10;
+    const retryDelay = 100;
+
+    for (let i = 0; i < maxRetries; i++) {
+        const existing = localStorage.getItem(LOCK_KEY);
+        if (existing) {
+            const parsed = JSON.parse(existing);
+            // Check if lock is stale (older than timeout)
+            if (Date.now() - parsed.timestamp < LOCK_TIMEOUT) {
+                // Lock is held by someone else, wait and retry
+                await new Promise(r => setTimeout(r, retryDelay));
+                continue;
+            }
+            // Lock is stale, we can take it
+        }
+
+        // Try to acquire lock
+        const claim = { id: myId, timestamp: Date.now() };
+        localStorage.setItem(LOCK_KEY, JSON.stringify(claim));
+
+        // Wait a bit and verify we still hold the lock
+        await new Promise(r => setTimeout(r, 50));
+
+        const verify = localStorage.getItem(LOCK_KEY);
+        if (verify) {
+            const verifyParsed = JSON.parse(verify);
+            if (verifyParsed.id === myId) {
+                // We successfully acquired the lock
+                log('LOCK Acquired: ' + myId.slice(-6));
+                return myId;
+            }
+        }
+        // Someone else grabbed the lock, retry
+        await new Promise(r => setTimeout(r, retryDelay));
+    }
+
+    log('LOCK Failed - contention detected', 'warn');
+    return null;
+}
+
+function releaseLock(myId) {
+    const current = localStorage.getItem(LOCK_KEY);
+    if (current) {
+        const parsed = JSON.parse(current);
+        if (parsed.id === myId) {
+            localStorage.removeItem(LOCK_KEY);
+            log('LOCK Released');
+        }
+    }
+}
+
+window.triggerSpin = async (playerId) => {
     // UI Cooldown
     const btn = document.getElementById(`btn-p${playerId}`);
     if (btn) {
         btn.disabled = true;
         btn.setAttribute('data-cooldown', 'true');
-        setTimeout(() => {
-            if (btn) {
-                btn.removeAttribute('data-cooldown');
-                if (appState.playerCounts[playerId] < 20) {
-                    btn.disabled = false;
-                }
-            }
-        }, 500);
     }
 
-    // USE WEB LOCKS API for atomic transactions
-    navigator.locks.request('obs_mk_spin_lock', async (lock) => {
+    // Acquire cross-process lock
+    const lockId = await acquireLock();
+    if (!lockId) {
+        // Failed to get lock, abort
+        log('SPIN Aborted - lock busy', 'warn');
+        if (btn) {
+            btn.removeAttribute('data-cooldown');
+            btn.disabled = false;
+        }
+        return;
+    }
+
+    try {
         // CRITICAL: Reload state from storage inside the lock!
-        // This ensures that if another tab/process held the lock just before us,
-        // we get their committed state (the true state of the deck).
         loadState();
 
-        if (appState.playerCounts[playerId] >= 20) return;
+        if (appState.playerCounts[playerId] >= 20) {
+            releaseLock(lockId);
+            return;
+        }
 
         // Force sync mode from UI to ensure WYSIWYG
         const currentModeEl = document.querySelector('input[name="deckMode"]:checked');
@@ -203,60 +284,39 @@ window.triggerSpin = (playerId) => {
         let isMiss = false;
         let resetOccurred = false;
 
-        // RETRY LOOP: Paranoid check against internal consistency or race
-        let attempts = 0;
-        let validPick = false;
+        // Filter available
+        let available = appState.deck.filter(item => !appState.usedItems.includes(item));
+        log(`SPIN: 残り${available.length}枚, 使用済み: [${appState.usedItems.join(',')}]`);
 
-        while (!validPick && attempts < 3) {
-            attempts++;
-
-            // Filter available
-            let available = appState.deck.filter(item => !appState.usedItems.includes(item));
-
-            if (available.length === 0) {
-                if (appState.mode === 'loop') {
-                    // Loop Mode: Reset usedItems and start fresh
-                    appState.usedItems = [];
-                    resetOccurred = true;
-
-                    // Refill available
-                    available = [...appState.deck];
-
-                    if (available.length === 0) {
-                        isMiss = true;
-                        validPick = true;
-                    } else {
-                        const randomIndex = Math.floor(Math.random() * available.length);
-                        result = available[randomIndex];
-                        // Don't push yet, verify at end of loop
-                    }
-                } else {
-                    // Exhaust Mode: Empty -> Miss
-                    isMiss = true;
-                    validPick = true;
-                }
+        if (available.length === 0) {
+            if (appState.mode === 'loop') {
+                // Loop Mode: Reset usedItems and start fresh
+                appState.usedItems = [];
+                resetOccurred = true;
+                available = [...appState.deck];
+                log('ループモード: 山札リセット');
             } else {
-                // Normal Pick
-                const randomIndex = Math.floor(Math.random() * available.length);
-                result = available[randomIndex];
+                // Exhaust Mode: Empty -> Miss
+                isMiss = true;
+                log('枯渇モード: 山札切れ → ハズレ');
             }
+        }
 
-            // Final Validation
-            if (!isMiss && result !== null) {
-                if (appState.usedItems.includes(result)) {
-                    // This should theoretically never happen due to filter,
-                    // but if state mutated asynchronously (impossible inside Lock?), we retry.
-                    console.warn('Detected duplicate pick candidate, retrying...', result);
-                    result = null;
-                    resetOccurred = false; // Undo partial reset flag if we are retrying
-                    continue;
-                } else {
-                    appState.usedItems.push(result);
-                    validPick = true;
-                }
+        if (!isMiss && available.length > 0) {
+            // Pick a random item
+            const randomIndex = Math.floor(Math.random() * available.length);
+            result = available[randomIndex];
+
+            // Final paranoid check
+            if (appState.usedItems.includes(result)) {
+                log(`致命的エラー: 重複検出! ${result} in [${appState.usedItems.join(',')}]`, 'error');
+                // This should NEVER happen. If it does, something is very wrong.
+                // Force a Miss to avoid showing duplicate
+                result = null;
+                isMiss = true;
             } else {
-                // Miss or valid empty
-                validPick = true;
+                appState.usedItems.push(result);
+                log(`結果: ${result} (使用済み: ${appState.usedItems.length}/${appState.deck.length})`);
             }
         }
 
@@ -272,7 +332,7 @@ window.triggerSpin = (playerId) => {
             timestamp: Date.now(),
             candidates: visualCandidates,
             resetOccurred,
-            mode: appState.mode // Send mode for Display Gatekeeper
+            mode: appState.mode
         };
 
         // Update State
@@ -285,7 +345,23 @@ window.triggerSpin = (playerId) => {
             type: 'SPIN',
             payload
         });
-    });
+
+        console.log('[SPIN] Complete. Result:', result, 'isMiss:', isMiss);
+
+    } finally {
+        // Always release lock
+        releaseLock(lockId);
+
+        // Re-enable button after cooldown
+        setTimeout(() => {
+            if (btn) {
+                btn.removeAttribute('data-cooldown');
+                if (appState.playerCounts[playerId] < 20) {
+                    btn.disabled = false;
+                }
+            }
+        }, 300);
+    }
 };
 
 window.resetGame = (skipConfirm = false) => {

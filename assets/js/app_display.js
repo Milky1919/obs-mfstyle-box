@@ -67,25 +67,16 @@ function handleReset() {
 function handleSpin(payload) {
     let { playerId, resultValue, isMiss, colorIndex, resetOccurred, mode } = payload;
 
-    // --- GATEKEEPER LOGIC ---
+    // Handle reset sync (Loop mode cycles)
     if (resetOccurred) {
         globalUsedItems.clear();
     }
 
+    // Track for display reference only (no blocking)
     if (!isMiss && resultValue) {
-        if (globalUsedItems.has(resultValue)) {
-            // Duplicate detected!
-            // In Exhaust mode, this is strictly forbidden.
-            // In Loop mode, if no reset occurred, this implies a race condition duplicate within the same cycle.
-            console.warn(`[Display Gatekeeper] Prevented duplicate display of: ${resultValue}. Mode: ${mode}`);
-            isMiss = true;
-            resultValue = null;
-        } else {
-            // Valid new item
-            globalUsedItems.add(resultValue);
-        }
+        globalUsedItems.add(resultValue);
     }
-    // ------------------------
+    // Note: We trust the controller's decision. No duplicate blocking here.
 
     // Create DOM elements
     const container = document.getElementById(`p${playerId}-history`);
@@ -166,6 +157,11 @@ function handleSpin(payload) {
                 // Reverting to basic random pick.
 
                 if (candidates.length > 0) {
+                    // CRITICAL: Don't overwrite finalized faces!
+                    if (faceEl.dataset.isFinal === "true") {
+                        return; // Skip - this face already has its final result
+                    }
+
                     faceEl.textContent = candidates[Math.floor(Math.random() * candidates.length)];
 
                     // Reset styling in case it was used before
