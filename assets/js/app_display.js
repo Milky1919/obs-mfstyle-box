@@ -22,6 +22,7 @@ const playerHistories = {
     3: [],
     4: []
 };
+const globalUsedItems = new Set(); // Gatekeeper for Uniqueness
 
 // Listen for messages
 broadcast.onmessage = (event) => {
@@ -55,6 +56,7 @@ function handleUpdateConfig(payload) {
 }
 
 function handleReset() {
+    globalUsedItems.clear(); // Reset gatekeeper
     for (let i = 1; i <= 4; i++) {
         const container = document.getElementById(`p${i}-history`);
         container.innerHTML = '';
@@ -63,7 +65,18 @@ function handleReset() {
 }
 
 function handleSpin(payload) {
-    const { playerId, resultValue, isMiss, colorIndex } = payload;
+    let { playerId, resultValue, isMiss, colorIndex, resetOccurred, mode } = payload;
+
+    // Handle reset sync (Loop mode cycles)
+    if (resetOccurred) {
+        globalUsedItems.clear();
+    }
+
+    // Track for display reference only (no blocking)
+    if (!isMiss && resultValue) {
+        globalUsedItems.add(resultValue);
+    }
+    // Note: We trust the controller's decision. No duplicate blocking here.
 
     // Create DOM elements
     const container = document.getElementById(`p${playerId}-history`);
@@ -144,6 +157,11 @@ function handleSpin(payload) {
                 // Reverting to basic random pick.
 
                 if (candidates.length > 0) {
+                    // CRITICAL: Don't overwrite finalized faces!
+                    if (faceEl.dataset.isFinal === "true") {
+                        return; // Skip - this face already has its final result
+                    }
+
                     faceEl.textContent = candidates[Math.floor(Math.random() * candidates.length)];
 
                     // Reset styling in case it was used before

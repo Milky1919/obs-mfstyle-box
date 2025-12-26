@@ -83,6 +83,30 @@ L</textarea>
         <div class="panel-section">
             <div class="panel-title">現在の山札数: <span id="deckCount">--</span></div>
         </div>
+
+        <!-- Log Window -->
+        <div class="panel-section">
+            <div class="panel-title">ログ
+                <button onclick="navigator.clipboard.writeText(document.getElementById('logOutput').innerText)"
+                    style="font-size:10px; padding:2px 5px;">📋 Copy</button>
+                <button onclick="document.getElementById('logOutput').innerHTML=''"
+                    style="font-size:10px; padding:2px 5px;">Clear</button>
+            </div>
+            <div id="logOutput" style="
+                background: #111;
+                color: #0f0;
+                font-family: monospace;
+                font-size: 10px;
+                height: 150px;
+                overflow-y: auto;
+                padding: 5px;
+                border-radius: 4px;
+                white-space: pre-wrap;
+                word-break: break-all;
+                user-select: text;
+                -webkit-user-select: text;
+            "></div>
+        </div>
     </div>
 
     <script src="./assets/js/app_controller.js"></script>

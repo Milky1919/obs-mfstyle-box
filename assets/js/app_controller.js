@@ -12,7 +12,26 @@ let appState = {
     layout: { x: 0, y: 0, scale: 1.0 } // Default layout
 };
 
-// OM
+// Visual Logger for OBS Docks (no dev tools)
+function log(message, type = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    const prefix = type === 'error' ? '❌' : type === 'warn' ? '⚠️' : '✅';
+    const logLine = `[${timestamp}] ${prefix} ${message}`;
+
+    // Console
+    if (type === 'error') console.error(logLine);
+    else if (type === 'warn') console.warn(logLine);
+    else console.log(logLine);
+
+    // UI Panel
+    const logEl = document.getElementById('logOutput');
+    if (logEl) {
+        logEl.innerHTML += logLine + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+}
+
+// DOM Elements
 const deckInput = document.getElementById('deckInput');
 const deckStatus = document.getElementById('deckStatus');
 const deckCountSpan = document.getElementById('deckCount');
@@ -26,25 +45,32 @@ window.addEventListener('DOMContentLoaded', () => {
     updateUI();
 });
 
-// Setup Sync Listener (To handle multiple controller tabs preventing duplicates)
+// Setup Sync Listener
 broadcast.onmessage = (event) => {
     const data = event.data;
     if (!data || !data.type) return;
 
     if (data.type === 'SPIN') {
         const payload = data.payload;
+
+        // Handle Loop Mode Auto-Reset Sync
+        // PROTECTION: In Exhaust Mode, we NEVER want to accept a cycle reset from a remote client
+        // that might think it's in Loop Mode.
+        if (payload.resetOccurred && appState.mode === 'loop') {
+            appState.usedItems = [];
+        }
+
         // Update local state from foreign spin
-        // ALWAYS track used items, even if we are locally in Loop mode currently.
-        // This ensures that if we switch to Exhaust (or auto-switch via UI), we know what's gone.
         if (payload.resultValue) {
+            // Paranoid check to ensure we track usage even if we missed the start
             if (!appState.usedItems.includes(payload.resultValue)) {
                 appState.usedItems.push(payload.resultValue);
             }
         }
         appState.playerCounts[payload.playerId] = (appState.playerCounts[payload.playerId] || 0) + 1;
         updateUI();
-        // Don't saveState() here to avoid race? strict consistency difficult without leader
-        // But preventing collision is key.
+        // We do NOT saveState() here. We trust the sender saved it.
+
     } else if (data.type === 'RESET_GAME') {
         appState.usedItems = [];
         appState.playerCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -58,16 +84,21 @@ broadcast.onmessage = (event) => {
 // Save Deck Config
 document.getElementById('saveDeckBtn').addEventListener('click', () => {
     const rawText = deckInput.value;
-    const items = rawText.split('\n').map(s => s.trim()).filter(s => s !== '');
+    // Deduplicate items immediately to prevent confusion
+    const rawItems = rawText.split('\n').map(s => s.trim()).filter(s => s !== '');
+    const uniqueItems = Array.from(new Set(rawItems));
 
-    if (items.length === 0) {
+    if (uniqueItems.length === 0) {
         alert('山札が空です！');
         return;
     }
 
+    // Update input to reflect deduplication
+    deckInput.value = uniqueItems.join('\n');
+
     const mode = document.querySelector('input[name="deckMode"]:checked').value;
 
-    appState.deck = items;
+    appState.deck = uniqueItems;
     appState.mode = mode;
     appState.usedItems = [];
     appState.playerCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -86,13 +117,9 @@ function loadState() {
             const parsed = JSON.parse(saved);
             // Merge basic fields
             if (parsed.deck) {
-                // PROTECTION: Don't just overwrite usedItems. Merge them.
-                // This ensures that if we have "more recent" items from Broadcast that haven't hit disk yet,
-                // we keep them.
+                // PROTECTION: Merge usedItems to prevent data loss
                 const currentUsed = new Set(appState.usedItems);
                 const diskUsed = new Set(parsed.usedItems || []);
-
-                // Union
                 const mergedUsed = new Set([...currentUsed, ...diskUsed]);
 
                 appState = { ...appState, ...parsed };
@@ -106,10 +133,9 @@ function loadState() {
                 const rad = document.querySelector(`input[name="deckMode"][value="${appState.mode}"]`);
                 if (rad) rad.checked = true;
             }
-            // Layout sync is separate usually but state has it
+            // Layout sync
             if (parsed.layout) {
                 appState.layout = { ...appState.layout, ...parsed.layout };
-                // Update inputs if they match current state
                 if (posXInput) posXInput.value = appState.layout.x;
                 if (posYInput) posYInput.value = appState.layout.y;
                 if (scaleInput) scaleInput.value = appState.layout.scale;
@@ -127,18 +153,20 @@ function saveState() {
 
 function updateUI() {
     // Deck count
-    // In loop mode, deck is practically infinite, but we show base size
-    // In exhaust mode, we show remaining
     let count = appState.deck.length;
     let modeText = appState.mode === 'exhaust' ? '[枯渇]' : '[ループ]';
 
+    // Calculate remaining items
+    const usedCount = appState.usedItems.length;
+    const remaining = appState.deck.filter(i => !appState.usedItems.includes(i)).length;
+
     if (appState.mode === 'exhaust') {
-        const remaining = appState.deck.filter(i => !appState.usedItems.includes(i)).length;
-        deckCountSpan.textContent = `${remaining} / ${count}`;
+        deckCountSpan.textContent = `${remaining} / ${count} (Used: ${usedCount})`;
         if (remaining === 0) deckStatus.textContent = `${modeText} Empty (Miss)`;
         else deckStatus.textContent = `${modeText} Ready`;
     } else {
-        deckCountSpan.textContent = `${count}`;
+        // Loop mode: show remaining in current cycle
+        deckCountSpan.textContent = `${remaining} / ${count} (Cycle) (Used: ${usedCount})`;
         deckStatus.textContent = `${modeText} Ready`;
     }
 
@@ -149,21 +177,102 @@ function updateUI() {
             btn.disabled = true;
             btn.innerHTML = `${i}P <small>MAX</small>`;
         } else {
-            btn.disabled = false;
+            // Only re-enable if not in cooldown
+            if (!btn.hasAttribute('data-cooldown')) {
+                btn.disabled = false;
+            }
             btn.innerHTML = `${i}P <small>SPIN</small>`;
         }
     }
 }
 
 // Core Logic
-window.triggerSpin = (playerId) => {
-    // USE WEB LOCKS API for atomic transactions across multiple tabs/docks.
-    navigator.locks.request('obs_mk_spin_lock', async (lock) => {
-        // CRITICAL: Always reload state from storage before acting.
-        // This prevents race conditions where rapid clicks use stale memory state.
+// Use localStorage-based locking instead of Web Locks.
+// Web Locks don't work across separate OBS browser source processes.
+const LOCK_KEY = 'obs_mk_spin_lock_v1';
+const LOCK_TIMEOUT = 5000; // Lock expires after 5 seconds (failsafe)
+
+async function acquireLock() {
+    const myId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const maxRetries = 10;
+    const retryDelay = 100;
+
+    for (let i = 0; i < maxRetries; i++) {
+        const existing = localStorage.getItem(LOCK_KEY);
+        if (existing) {
+            const parsed = JSON.parse(existing);
+            // Check if lock is stale (older than timeout)
+            if (Date.now() - parsed.timestamp < LOCK_TIMEOUT) {
+                // Lock is held by someone else, wait and retry
+                await new Promise(r => setTimeout(r, retryDelay));
+                continue;
+            }
+            // Lock is stale, we can take it
+        }
+
+        // Try to acquire lock
+        const claim = { id: myId, timestamp: Date.now() };
+        localStorage.setItem(LOCK_KEY, JSON.stringify(claim));
+
+        // Wait a bit and verify we still hold the lock
+        await new Promise(r => setTimeout(r, 50));
+
+        const verify = localStorage.getItem(LOCK_KEY);
+        if (verify) {
+            const verifyParsed = JSON.parse(verify);
+            if (verifyParsed.id === myId) {
+                // We successfully acquired the lock
+                log('LOCK Acquired: ' + myId.slice(-6));
+                return myId;
+            }
+        }
+        // Someone else grabbed the lock, retry
+        await new Promise(r => setTimeout(r, retryDelay));
+    }
+
+    log('LOCK Failed - contention detected', 'warn');
+    return null;
+}
+
+function releaseLock(myId) {
+    const current = localStorage.getItem(LOCK_KEY);
+    if (current) {
+        const parsed = JSON.parse(current);
+        if (parsed.id === myId) {
+            localStorage.removeItem(LOCK_KEY);
+            log('LOCK Released');
+        }
+    }
+}
+
+window.triggerSpin = async (playerId) => {
+    // UI Cooldown
+    const btn = document.getElementById(`btn-p${playerId}`);
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute('data-cooldown', 'true');
+    }
+
+    // Acquire cross-process lock
+    const lockId = await acquireLock();
+    if (!lockId) {
+        // Failed to get lock, abort
+        log('SPIN Aborted - lock busy', 'warn');
+        if (btn) {
+            btn.removeAttribute('data-cooldown');
+            btn.disabled = false;
+        }
+        return;
+    }
+
+    try {
+        // CRITICAL: Reload state from storage inside the lock!
         loadState();
 
-        if (appState.playerCounts[playerId] >= 20) return;
+        if (appState.playerCounts[playerId] >= 20) {
+            releaseLock(lockId);
+            return;
+        }
 
         // Force sync mode from UI to ensure WYSIWYG
         const currentModeEl = document.querySelector('input[name="deckMode"]:checked');
@@ -173,87 +282,86 @@ window.triggerSpin = (playerId) => {
 
         let result = null;
         let isMiss = false;
+        let resetOccurred = false;
 
-        // Strict Retry Loop for Uniqueness
-        // We try up to 3 times to get a valid result if something weird happens, 
-        // although filtering should guarantee it.
-        let attempts = 0;
-        let validPick = false;
-        let available = [];
+        // Filter available
+        let available = appState.deck.filter(item => !appState.usedItems.includes(item));
+        log(`SPIN: 残り${available.length}枚, 使用済み: [${appState.usedItems.join(',')}]`);
 
-        while (!validPick && attempts < 3) {
-            attempts++;
-
-            // Filter available items if exhaust
-            available = [...appState.deck];
-            if (appState.mode === 'exhaust') {
-                available = available.filter(item => !appState.usedItems.includes(item));
-            }
-
-            if (available.length === 0) {
-                // Empty
-                if (appState.mode === 'loop') {
-                    isMiss = true;
-                    validPick = true;
-                } else {
-                    // Exhaust mode empty -> Miss
-                    isMiss = true;
-                    validPick = true;
-                }
+        if (available.length === 0) {
+            if (appState.mode === 'loop') {
+                // Loop Mode: Reset usedItems and start fresh
+                appState.usedItems = [];
+                resetOccurred = true;
+                available = [...appState.deck];
+                log('ループモード: 山札リセット');
             } else {
-                // Random pick
-                const randomIndex = Math.floor(Math.random() * available.length);
-                result = available[randomIndex];
-
-                // Paranoid Check for Exhaust Mode
-                if (appState.mode === 'exhaust') {
-                    if (appState.usedItems.includes(result)) {
-                        console.warn('Duplicate detected during pick, retrying...', result);
-                        result = null; // Retry
-                        continue;
-                    } else {
-                        appState.usedItems.push(result);
-                        validPick = true;
-                    }
-                } else {
-                    validPick = true;
-                }
+                // Exhaust Mode: Empty -> Miss
+                isMiss = true;
+                log('枯渇モード: 山札切れ → ハズレ');
             }
         }
 
-        // Color ID: Simple hashing or random? 
-        // "配色はインデックス順" from spec 2.3 usually means 0..19 loop based on history count?
-        // "抽選結果の文字色・背景色として、以下の20色をインデックス順に使用する"
-        // Does it mean fixed color for "Item A", or "1st spin is Red, 2nd is Orange"?
-        // Usually Mario Kart is random or item-based.
-        // Spec says "Index 0..19". Let's use the local player history count for rainbow effect.
-        // Color ID: Simple hashing loop
-        const colorIndex = appState.playerCounts[playerId] % 20;
+        if (!isMiss && available.length > 0) {
+            // Pick a random item
+            const randomIndex = Math.floor(Math.random() * available.length);
+            result = available[randomIndex];
 
-        // Visual Candidates:
-        // Even if it's a "Miss" (result is effectively null), we want the cube to visually rotate through options.
-        // If available is empty, we must fallback to the full deck for the animation.
-        const visualCandidates = (available.length > 0) ? available : appState.deck;
+            // Final paranoid check
+            if (appState.usedItems.includes(result)) {
+                log(`致命的エラー: 重複検出! ${result} in [${appState.usedItems.join(',')}]`, 'error');
+                // This should NEVER happen. If it does, something is very wrong.
+                // Force a Miss to avoid showing duplicate
+                result = null;
+                isMiss = true;
+            } else {
+                appState.usedItems.push(result);
+                log(`結果: ${result} (使用済み: ${appState.usedItems.length}/${appState.deck.length})`);
+            }
+        }
+
+        // Color ID
+        const colorIndex = appState.playerCounts[playerId] % 20;
+        const visualCandidates = (appState.deck.length > 0) ? appState.deck : ['?'];
 
         const payload = {
             playerId,
-            resultValue: result, // Null if Miss
+            resultValue: result,
             isMiss,
             colorIndex,
             timestamp: Date.now(),
-            candidates: visualCandidates.length > 0 ? visualCandidates : ['?'] // Fallback if deck is empty too
+            candidates: visualCandidates,
+            resetOccurred,
+            mode: appState.mode
         };
 
         // Update State
         appState.playerCounts[playerId]++;
-        saveState();
+        saveState(); // Commit to Disk immediately
+        updateUI();
 
         // Send
         broadcast.postMessage({
             type: 'SPIN',
             payload
         });
-    });
+
+        console.log('[SPIN] Complete. Result:', result, 'isMiss:', isMiss);
+
+    } finally {
+        // Always release lock
+        releaseLock(lockId);
+
+        // Re-enable button after cooldown
+        setTimeout(() => {
+            if (btn) {
+                btn.removeAttribute('data-cooldown');
+                if (appState.playerCounts[playerId] < 20) {
+                    btn.disabled = false;
+                }
+            }
+        }, 300);
+    }
 };
 
 window.resetGame = (skipConfirm = false) => {
